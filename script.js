@@ -52,6 +52,15 @@ function doPost(e) {
 }
 
 // =====================================
+// Trigger for Manual Edits
+// =====================================
+function onEdit(e) {
+  if (!e) return;
+  const sheet = e.source.getActiveSheet();
+  cleanEmptySpace(sheet);
+}
+
+// =====================================
 // Read System
 // =====================================
 function handleRead(sheet, payload) {
@@ -142,8 +151,24 @@ function handleWrite(sheet, payload) {
     sheet.getRange(foundRowIndex + 1, 1, 1, headers.length).setValues([rowToUpdate]);
     return { status: "success", data: { action: "updated", message: "Data updated successfully" } };
   } else {
+    // Find the real last row and insert directly below it
     let newRow = headers.map(h => data[h] !== undefined ? data[h] : "");
-    sheet.appendRow(newRow);
+    let rLastRow = 1;
+    
+    if (allValues.length > 0) {
+      for (let r = allValues.length - 1; r >= 0; r--) {
+        if (allValues[r].some(cell => cell !== null && cell !== "" && String(cell).trim() !== "")) {
+          rLastRow = r + 1;
+          break;
+        }
+      }
+    }
+
+    if (rLastRow >= sheet.getMaxRows()) {
+      sheet.insertRowAfter(sheet.getMaxRows());
+    }
+
+    sheet.getRange(rLastRow + 1, 1, 1, headers.length).setValues([newRow]);
     return { status: "success", data: { action: "inserted", message: "New data inserted successfully" } };
   }
 }
@@ -194,13 +219,64 @@ function getAndSyncHeaders(sheet, dataObj) {
 }
 
 function cleanEmptySpace(sheet) {
-  const maxRows = sheet.getMaxRows();
-  const lastRow = sheet.getLastRow();
-  if (maxRows > lastRow && lastRow > 0) sheet.deleteRows(lastRow + 1, maxRows - lastRow);
+  try {
+    const maxRows = sheet.getMaxRows();
+    const maxCols = sheet.getMaxColumns();
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
 
-  const maxCols = sheet.getMaxColumns();
-  const lastCol = sheet.getLastColumn();
-  if (maxCols > lastCol && lastCol > 0) sheet.deleteColumns(lastCol + 1, maxCols - lastCol);
+    if (lastRow === 0 && lastCol === 0) return;
+
+    const data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+
+    let realLastRow = 1;
+    for (let i = lastRow - 1; i >= 0; i--) {
+      if (data[i].some(cell => cell !== null && cell !== "" && String(cell).trim() !== "")) {
+        realLastRow = i + 1;
+        break;
+      }
+    }
+
+    let realLastCol = 1;
+    for (let j = lastCol - 1; j >= 0; j--) {
+      let colHasData = false;
+      for (let i = 0; i < realLastRow; i++) {
+        if (data[i][j] !== null && data[i][j] !== "" && String(data[i][j]).trim() !== "") {
+          colHasData = true;
+          break;
+        }
+      }
+      if (colHasData) {
+        realLastCol = j + 1;
+        break;
+      }
+    }
+
+    // 1. Delete trailing empty rows and columns at the very end
+    if (maxRows > realLastRow) {
+      sheet.deleteRows(realLastRow + 1, maxRows - realLastRow);
+    }
+    if (maxCols > realLastCol) {
+      sheet.deleteColumns(realLastCol + 1, maxCols - realLastCol);
+    }
+
+    // 2. Delete empty rows stuck in the MIDDLE of the data
+    for (let i = realLastRow - 1; i >= 1; i--) {
+      let isEmpty = true;
+      for (let j = 0; j < realLastCol; j++) {
+        if (data[i][j] !== null && data[i][j] !== "" && String(data[i][j]).trim() !== "") {
+          isEmpty = false;
+          break;
+        }
+      }
+      if (isEmpty) {
+        sheet.deleteRow(i + 1);
+      }
+    }
+
+  } catch (error) {
+    console.error("Cleanup Error: ", error);
+  }
 }
 
 function logError(error, payload) {
@@ -211,4 +287,4 @@ function logError(error, payload) {
   }
   const safePayload = payload ? JSON.stringify(payload) : "No Payload";
   logSheet.appendRow([new Date(), error.message, safePayload]);
-          }
+}
