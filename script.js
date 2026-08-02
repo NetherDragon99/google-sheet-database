@@ -57,11 +57,13 @@ function doPost(e) {
 function onEdit(e) {
   if (!e) return;
   const sheet = e.source.getActiveSheet();
-  cleanEmptySpace(sheet);
+  if (sheet.getName() !== "_Cache" && sheet.getName() !== "Logs") {
+    cleanEmptySpace(sheet);
+  }
 }
 
 // =====================================
-// Read System
+// Read System (Supports Persistent Sheet Cache & onlyChanges)
 // =====================================
 function handleRead(sheet, payload) {
   let where = payload.where;
@@ -72,10 +74,11 @@ function handleRead(sheet, payload) {
   else if (!Array.isArray(select)) select = [];
 
   const resHash = payload.resHash || ""; 
+  const onlyChanges = payload.onlyChanges === true || payload.onlyChanges === "true";
 
   const dataRange = sheet.getDataRange().getValues();
   if (dataRange.length === 0 || dataRange[0].length === 0 || dataRange[0][0] === "") {
-    return { status: "success", data: { items: [], count: 0, resHash: "" } };
+    return { status: "success", data: { isDiff: false, items: [], count: 0, resHash: "" } };
   }
 
   const headers = dataRange.shift(); 
@@ -107,11 +110,138 @@ function handleRead(sheet, payload) {
 
   const currentHash = generateHash(results);
 
+  // If data is completely unmodified
   if (resHash && resHash === currentHash) {
     return { status: "not_modified", data: { resHash: currentHash, message: "Data not modified" } };
   }
 
-  return { status: "success", data: { items: results, count: results.length, resHash: currentHash } };
+  // Generate row-level fingerprint map
+  let currentMap = {};
+  results.forEach((item, idx) => {
+    let itemId = item.id || item.ID || item.userId || ("row_" + idx);
+    currentMap[itemId] = generateHash(item);
+  });
+
+  const cacheSheet = getOrCreateCacheSheet();
+
+  // Handle diffing if requested and resHash is provided
+  if (onlyChanges && resHash) {
+    let prevMap = getPersistentCache(cacheSheet, resHash);
+
+    if (prevMap && typeof prevMap === 'object') {
+      let updatedItems = [];
+      let currentIds = new Set();
+
+      results.forEach((item, idx) => {
+        let itemId = item.id || item.ID || item.userId || ("row_" + idx);
+        currentIds.add(String(itemId));
+        let itemHash = currentMap[itemId];
+
+        // Check if item is new or modified
+        if (!prevMap[itemId] || prevMap[itemId] !== itemHash) {
+          updatedItems.push(item);
+        }
+      });
+
+      // Check for deleted items
+      let deletedIds = [];
+      Object.keys(prevMap).forEach(prevId => {
+        if (!currentIds.has(String(prevId))) {
+          deletedIds.push(prevId);
+        }
+      });
+
+      // Save the NEW state for future diffs
+      savePersistentCache(cacheSheet, currentHash, currentMap);
+
+      return {
+        status: "success",
+        data: {
+          isDiff: true,
+          updated: updatedItems,
+          deleted: deletedIds,
+          count: updatedItems.length,
+          resHash: currentHash
+        }
+      };
+    }
+  }
+
+  // Fallback: Return full dataset and save current state
+  savePersistentCache(cacheSheet, currentHash, currentMap);
+
+  return { status: "success", data: { isDiff: false, items: results, count: results.length, resHash: currentHash } };
+}
+
+// =====================================
+// Persistent Cache Helpers (_Cache Sheet)
+// =====================================
+function getOrCreateCacheSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let cacheSheet = ss.getSheetByName("_Cache");
+  if (!cacheSheet) {
+    cacheSheet = ss.insertSheet("_Cache");
+    cacheSheet.appendRow(["resHash", "rowHashes", "updatedAt"]);
+  }
+  return cacheSheet;
+}
+
+function savePersistentCache(cacheSheet, resHash, rowMapObj) {
+  try {
+    const data = cacheSheet.getDataRange().getValues();
+    const mapJson = JSON.stringify(rowMapObj);
+    const now = new Date();
+
+    let found = false;
+    if (data.length > 1) {
+      for (let i = 1; i < data.length; i++) {
+        if (data[i][0] === resHash) {
+          cacheSheet.getRange(i + 1, 1, 1, 3).setValues([[resHash, mapJson, now]]);
+          found = true;
+          break;
+        }
+      }
+    }
+    
+    if (!found) {
+      cacheSheet.appendRow([resHash, mapJson, now]);
+    }
+
+    // Auto-prune: delete records older than 30 days
+    const currentRows = cacheSheet.getLastRow();
+    if (currentRows > 1) {
+      const timeColumn = cacheSheet.getRange(2, 3, currentRows - 1, 1).getValues();
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      
+      // Loop backwards to safely delete rows without shifting indices
+      for (let i = timeColumn.length - 1; i >= 0; i--) {
+        const rowDate = new Date(timeColumn[i][0]);
+        if (rowDate < thirtyDaysAgo) {
+          cacheSheet.deleteRow(i + 2); // i + 2 because data starts at row 2 (row 1 is headers)
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Save Persistent Cache Error: ", err);
+  }
+}
+
+function getPersistentCache(cacheSheet, resHash) {
+  try {
+    const data = cacheSheet.getDataRange().getValues();
+    if (data.length <= 1) return null;
+
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === resHash) {
+        let jsonStr = data[i][1];
+        return (jsonStr && jsonStr !== "") ? JSON.parse(jsonStr) : null;
+      }
+    }
+  } catch (err) {
+    console.error("Get Persistent Cache Error: ", err);
+  }
+  return null;
 }
 
 // =====================================
@@ -252,7 +382,7 @@ function cleanEmptySpace(sheet) {
       }
     }
 
-    // 1. Delete trailing empty rows and columns at the very end
+    // 1. Delete trailing empty rows and columns
     if (maxRows > realLastRow) {
       sheet.deleteRows(realLastRow + 1, maxRows - realLastRow);
     }
@@ -260,7 +390,7 @@ function cleanEmptySpace(sheet) {
       sheet.deleteColumns(realLastCol + 1, maxCols - realLastCol);
     }
 
-    // 2. Delete empty rows stuck in the MIDDLE of the data
+    // 2. Delete empty rows stuck in the MIDDLE of data
     for (let i = realLastRow - 1; i >= 1; i--) {
       let isEmpty = true;
       for (let j = 0; j < realLastCol; j++) {
