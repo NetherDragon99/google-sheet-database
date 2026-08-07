@@ -214,11 +214,10 @@ function savePersistentCache(cacheSheet, resHash, rowMapObj) {
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       
-      // Loop backwards to safely delete rows without shifting indices
       for (let i = timeColumn.length - 1; i >= 0; i--) {
         const rowDate = new Date(timeColumn[i][0]);
         if (rowDate < thirtyDaysAgo) {
-          cacheSheet.deleteRow(i + 2); // i + 2 because data starts at row 2 (row 1 is headers)
+          cacheSheet.deleteRow(i + 2);
         }
       }
     }
@@ -278,7 +277,12 @@ function handleWrite(sheet, payload) {
 
   if (foundRowIndex > -1) {
     let rowToUpdate = headers.map((h, idx) => data[h] !== undefined ? data[h] : allValues[foundRowIndex][idx]);
-    sheet.getRange(foundRowIndex + 1, 1, 1, headers.length).setValues([rowToUpdate]);
+    let targetRange = sheet.getRange(foundRowIndex + 1, 1, 1, headers.length);
+    targetRange.setValues([rowToUpdate]);
+    
+    // Reset formatting to prevent random inherited colors
+    targetRange.setBackground(null).setFontColor(null).setFontWeight("normal");
+    
     return { status: "success", data: { action: "updated", message: "Data updated successfully" } };
   } else {
     // Find the real last row and insert directly below it
@@ -298,7 +302,12 @@ function handleWrite(sheet, payload) {
       sheet.insertRowAfter(sheet.getMaxRows());
     }
 
-    sheet.getRange(rLastRow + 1, 1, 1, headers.length).setValues([newRow]);
+    let targetRange = sheet.getRange(rLastRow + 1, 1, 1, headers.length);
+    targetRange.setValues([newRow]);
+    
+    // Reset formatting to prevent random inherited colors
+    targetRange.setBackground(null).setFontColor(null).setFontWeight("normal");
+
     return { status: "success", data: { action: "inserted", message: "New data inserted successfully" } };
   }
 }
@@ -343,7 +352,10 @@ function getAndSyncHeaders(sheet, dataObj) {
   });
 
   if (modified && headers.length > 0) {
-    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    let headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setValues([headers]);
+    // Ensure new headers are also visible
+    headerRange.setBackground("#e0e0e0").setFontColor("#000000").setFontWeight("bold");
   }
   return headers;
 }
